@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: trustguard-sa
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1
+    plan: free
+    envVars:
+      - key: ACCESS_TOKEN
+        value: EAAYnIXB43fUBRpFMJSrhaTOX8hJiDTraVB6dD6fOT9fi5SQI1RxkDG926CLBpnkDZB4ffOwP2T8vgdx4tMjEkwmu2IMoxKsCftXmLSzBOWGXP9gkzE2xYKvqNbWTOuUBZBe6A1fltZAVOLB6MqshMW1lqWf58vehQUWEP9Qs9za9ADHc3HhVyZAMyZC2kXGsy4Bqiu6IpRTaH8Mk254xAPQqj0UtSAZAeZA
+      - key: PHONE_NUMBER_ID
+        value: "1222834277573081"
+      - key: VERIFY_TOKEN
+        value: trustguard2026

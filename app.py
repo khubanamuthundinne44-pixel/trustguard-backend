@@ -311,63 +311,93 @@ def receive_message():
         # ── Greeting ──────────────────────────────────────────────────────
         if sender not in greeted_users:
             greeted_users.add(sender)
-            send_whatsapp_message(
-                sender,
-                (
-                    "👋 Welcome to *TrustGuard SA*.\n\n"
-                    "Send or forward any suspicious media to verify it:\n\n"
-                    "🎙️ *Voice notes* — detect AI-generated voices\n"
-                    "🖼️ *Images* — detect AI-generated or manipulated photos\n"
-                    "🎥 *Videos* — detect deepfake or face-swapped footage\n\n"
-                    "Forward the suspicious media here and we'll give you a Trust Score."
-                ),
-            )
+            try:
+                send_whatsapp_message(
+                    sender,
+                    (
+                        "👋 Welcome to *TrustGuard SA*.\n\n"
+                        "Send or forward any suspicious media to verify it:\n\n"
+                        "🎙️ *Voice notes* — detect AI-generated voices\n"
+                        "🖼️ *Images* — detect AI-generated or manipulated photos\n"
+                        "🎥 *Videos* — detect deepfake or face-swapped footage\n\n"
+                        "Forward the suspicious media here and we'll give you a Trust Score."
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("Could not send greeting to %s: %s", sender, exc)
             if msg_type not in ALL_MEDIA_TYPES:
                 return jsonify({"status": "ok"}), 200
 
         # ── Audio / voice note ────────────────────────────────────────────
         if msg_type in AUDIO_TYPES:
-            send_whatsapp_message(sender, "🎙️ Analysing your voice note… Please wait a moment.")
-            media_id = message[msg_type]["id"]
-            media_bytes = download_media(media_id)
-            result = analyze_audio(media_bytes)
-            send_whatsapp_message(sender, build_trust_reply(result, msg_type))
+            try:
+                send_whatsapp_message(sender, "🎙️ Analysing your voice note… Please wait a moment.")
+                media_id = message[msg_type]["id"]
+                media_bytes = download_media(media_id)
+                result = analyze_audio(media_bytes)
+                send_whatsapp_message(sender, build_trust_reply(result, msg_type))
+            except Exception as exc:
+                logger.error("Audio analysis failed for %s: %s", sender, exc, exc_info=True)
+                try:
+                    send_whatsapp_message(sender, "❌ Sorry, something went wrong during analysis. Please try again.")
+                except Exception:
+                    pass
 
         # ── Image ─────────────────────────────────────────────────────────
         elif msg_type in IMAGE_TYPES:
-            send_whatsapp_message(sender, "🖼️ Analysing your image for AI manipulation… Please wait.")
-            media_id = message["image"]["id"]
-            media_bytes = download_media(media_id)
-            result = analyze_image(media_bytes)
-            send_whatsapp_message(sender, build_trust_reply(result, msg_type))
+            try:
+                send_whatsapp_message(sender, "🖼️ Analysing your image for AI manipulation… Please wait.")
+                media_id = message["image"]["id"]
+                media_bytes = download_media(media_id)
+                result = analyze_image(media_bytes)
+                send_whatsapp_message(sender, build_trust_reply(result, msg_type))
+            except Exception as exc:
+                logger.error("Image analysis failed for %s: %s", sender, exc, exc_info=True)
+                try:
+                    send_whatsapp_message(sender, "❌ Sorry, something went wrong during analysis. Please try again.")
+                except Exception:
+                    pass
 
         # ── Video ─────────────────────────────────────────────────────────
         elif msg_type in VIDEO_TYPES:
-            send_whatsapp_message(sender, "🎥 Analysing your video for deepfakes… This may take a moment.")
-            media_id = message["video"]["id"]
-            media_bytes = download_media(media_id)
-            result = analyze_video(media_bytes)
-            send_whatsapp_message(sender, build_trust_reply(result, msg_type))
+            try:
+                send_whatsapp_message(sender, "🎥 Analysing your video for deepfakes… This may take a moment.")
+                media_id = message["video"]["id"]
+                media_bytes = download_media(media_id)
+                result = analyze_video(media_bytes)
+                send_whatsapp_message(sender, build_trust_reply(result, msg_type))
+            except Exception as exc:
+                logger.error("Video analysis failed for %s: %s", sender, exc, exc_info=True)
+                try:
+                    send_whatsapp_message(sender, "❌ Sorry, something went wrong during analysis. Please try again.")
+                except Exception:
+                    pass
 
         # ── Text / unsupported ────────────────────────────────────────────
         elif msg_type == "text":
-            send_whatsapp_message(
-                sender,
-                (
-                    "Please *send or forward the suspicious media* you want me to check:\n\n"
-                    "🎙️ Voice note\n"
-                    "🖼️ Image\n"
-                    "🎥 Video"
-                ),
-            )
+            try:
+                send_whatsapp_message(
+                    sender,
+                    (
+                        "Please *send or forward the suspicious media* you want me to check:\n\n"
+                        "🎙️ Voice note\n"
+                        "🖼️ Image\n"
+                        "🎥 Video"
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("Could not send text reply to %s: %s", sender, exc)
         else:
-            send_whatsapp_message(
-                sender,
-                (
-                    "I can analyse *voice notes*, *images*, and *videos* for AI manipulation.\n"
-                    "Please forward the suspicious media here."
-                ),
-            )
+            try:
+                send_whatsapp_message(
+                    sender,
+                    (
+                        "I can analyse *voice notes*, *images*, and *videos* for AI manipulation.\n"
+                        "Please forward the suspicious media here."
+                    ),
+                )
+            except Exception as exc:
+                logger.warning("Could not send reply to %s: %s", sender, exc)
 
     except (KeyError, IndexError, TypeError) as exc:
         logger.error("Failed to parse webhook payload: %s | raw=%s", exc, data)

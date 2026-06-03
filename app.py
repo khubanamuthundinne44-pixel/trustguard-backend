@@ -45,7 +45,7 @@ def _json_headers() -> dict:
 
 
 def send_whatsapp_message(to: str, body: str) -> dict:
-    """Send a plain-text WhatsApp message to a recipient."""
+    """Send a plain-text WhatsApp message to a recipient. Never raises -- returns dict with success status."""
     url = f"{WHATSAPP_API_BASE}/{PHONE_NUMBER_ID}/messages"
     payload = {
         "messaging_product": "whatsapp",
@@ -53,10 +53,21 @@ def send_whatsapp_message(to: str, body: str) -> dict:
         "type": "text",
         "text": {"body": body},
     }
-    response = requests.post(url, headers=_json_headers(), json=payload, timeout=15)
-    response.raise_for_status()
-    logger.info("Message sent to %s", to)
-    return response.json()
+    try:
+        response = requests.post(url, headers=_json_headers(), json=payload, timeout=15)
+        if response.status_code == 200:
+            logger.info("Message sent to %s", to)
+            return {"ok": True, "data": response.json()}
+        else:
+            logger.error("WhatsApp API error for %s: status=%d body=%s",
+                         to, response.status_code, response.text[:300])
+            return {"ok": False, "error": response.text[:300]}
+    except requests.exceptions.Timeout:
+        logger.error("WhatsApp API timeout for %s", to)
+        return {"ok": False, "error": "timeout"}
+    except Exception as exc:
+        logger.error("WhatsApp API exception for %s: %s", to, exc)
+        return {"ok": False, "error": str(exc)[:300]}
 
 
 def download_media(media_id: str) -> bytes:

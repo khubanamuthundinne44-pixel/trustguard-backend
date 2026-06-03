@@ -7,25 +7,31 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-ACCESS_TOKEN = os.environ.get("ACCESS_TOKEN")
+# ── Env vars ────────────────────────────────────────────────────────────────
+ACCESS_TOKEN    = os.environ.get("ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
-VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
+VERIFY_TOKEN    = os.environ.get("VERIFY_TOKEN")
+HF_TOKEN        = os.environ.get("HF_TOKEN")          # Hugging Face API token
 
 WHATSAPP_API_BASE = "https://graph.facebook.com/v19.0"
+HF_API_BASE       = "https://api-inference.huggingface.co/models"
+
+# Hugging Face model endpoints
+HF_AUDIO_MODEL  = "garystafford/wav2vec2-deepfake-voice-detector"
+HF_IMAGE_MODEL  = "dima806/deepfake_vs_real_image_detection"
+HF_VIDEO_MODEL  = "dima806/deepfake_vs_real_image_detection"   # frame-level; see notes below
 
 # Supported media message types grouped by category
-AUDIO_TYPES = {"audio", "voice"}
-IMAGE_TYPES = {"image"}
-VIDEO_TYPES = {"video"}
+AUDIO_TYPES     = {"audio", "voice"}
+IMAGE_TYPES     = {"image"}
+VIDEO_TYPES     = {"video"}
 ALL_MEDIA_TYPES = AUDIO_TYPES | IMAGE_TYPES | VIDEO_TYPES
 
 # Track users who have already received the greeting (in-memory; resets on restart)
 greeted_users: set[str] = set()
 
 
-# ---------------------------------------------------------------------------
-# WhatsApp helpers
-# ---------------------------------------------------------------------------
+# ── WhatsApp helpers ─────────────────────────────────────────────────────────
 
 def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {ACCESS_TOKEN}"}
@@ -80,134 +86,135 @@ def download_media(media_id: str) -> bytes:
     return media_resp.content
 
 
-# ---------------------------------------------------------------------------
-# Deepfake analysis placeholders
-# ---------------------------------------------------------------------------
+# ── Hugging Face deepfake detection ──────────────────────────────────────────
+
+def _hf_query(model: str, data: bytes) -> dict:
+    """
+    Send raw bytes to a Hugging Face Inference API model and return the parsed JSON.
+
+    Retries up to 3 times if the model is cold-starting (loading response).
+    """
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    url = f"{HF_API_BASE}/{model}"
+
+    for attempt in range(3):
+        resp = requests.post(url, headers=headers, data=data, timeout=120)
+
+        if resp.status_code == 200:
+            return resp.json()
+
+        result = resp.json() if resp.content else {}
+        if "error" in result and "loading" in result["error"].lower():
+            import time
+            wait = result.get("estimated_time", 20)
+            logger.info("HF model loading, waiting %.0fs (attempt %d/3)", wait, attempt + 1)
+            time.sleep(min(wait, 30))
+            continue
+
+        logger.error("HF API error: status=%d body=%s", resp.status_code, resp.text[:300])
+        raise RuntimeError(f"HF API returned {resp.status_code}: {resp.text[:300]}")
+
+    raise RuntimeError("HF model failed to load after 3 attempts")
+
 
 def analyze_audio(audio_bytes: bytes) -> dict:
     """
-    PLACEHOLDER – detect AI-generated voice from audio bytes.
+    Detect AI-generated / cloned voice via Hugging Face.
 
-    Replace this body with your chosen provider, e.g.:
+    Model: garystafford/wav2vec2-deepfake-voice-detector
+    Returns labels like "bonafide" (real) or "spoof" (fake) with confidence.
 
-    ┌─────────────────────────────────────────────────────────────────────────┐
-    │  UncovAI  (https://uncovai.com)                                         │
-    │  DEEPFAKE_API_KEY = os.environ.get("DEEPFAKE_API_KEY")                  │
-    │  resp = requests.post(                                                   │
-    │      "https://api.uncovai.com/v1/detect",                               │
-    │      headers={"Authorization": f"Bearer {DEEPFAKE_API_KEY}"},           │
-    │      files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},           │
-    │      timeout=60,                                                         │
-    │  )                                                                       │
-    │  data = resp.json()                                                      │
-    │  return {                                                                 │
-    │      "trust_score": 1.0 - data["deepfake_probability"],                 │
-    │      "is_deepfake": data["is_deepfake"],                                │
-    │      "confidence": data["confidence"],                                   │
-    │  }                                                                       │
-    ├─────────────────────────────────────────────────────────────────────────┤
-    │  Reality Defender  (https://realitydefender.com)                        │
-    │  resp = requests.post(                                                   │
-    │      "https://api.realitydefender.com/v1/audio/analyze",               │
-    │      headers={"Authorization": f"Bearer {DEEPFAKE_API_KEY}"},           │
-    │      files={"audio": audio_bytes},                                       │
-    │      timeout=60,                                                         │
-    │  )                                                                       │
-    │  data = resp.json()                                                      │
-    │  trust = data["authenticity_score"]                                      │
-    │  return {"trust_score": trust, "is_deepfake": trust < 0.5,              │
-    │          "confidence": data["confidence"]}                               │
-    └─────────────────────────────────────────────────────────────────────────┘
-
-    Returns:
-        dict: trust_score (0.0–1.0), is_deepfake (bool), confidence (0.0–1.0)
+    Return schema:
+        {"trust_score": 0.0-1.0, "is_deepfake": bool, "confidence": 0.0-1.0}
     """
-    logger.info("analyze_audio called with %d bytes (placeholder)", len(audio_bytes))
-    return {"trust_score": 0.18, "is_deepfake": True, "confidence": 0.91}
+    logger.info("analyze_audio: sending %d bytes to HF model %s", len(audio_bytes), HF_AUDIO_MODEL)
+
+    result = _hf_query(HF_AUDIO_MODEL, audio_bytes)
+
+    # The model returns a list of label-score dicts, e.g.:
+    # [{"label": "bonafide", "score": 0.95}, {"label": "spoof", "score": 0.05}]
+    if isinstance(result, list) and result:
+        scores = {item["label"].lower(): item["score"] for item in result}
+        spoof_score = scores.get("spoof", 0.0)
+        bonafide_score = scores.get("bonafide", 0.0)
+
+        trust_score = bonafide_score
+        is_deepfake = spoof_score > bonafide_score
+        confidence = max(spoof_score, bonafide_score)
+
+        logger.info("analyze_audio: bonafide=%.3f spoof=%.3f => deepfake=%s",
+                     bonafide_score, spoof_score, is_deepfake)
+        return {"trust_score": trust_score, "is_deepfake": is_deepfake, "confidence": confidence}
+
+    logger.warning("analyze_audio: unexpected HF response format: %s", str(result)[:200])
+    return {"trust_score": 0.5, "is_deepfake": False, "confidence": 0.0}
 
 
 def analyze_image(image_bytes: bytes) -> dict:
     """
-    PLACEHOLDER – detect AI-generated or manipulated images.
+    Detect AI-generated / manipulated images via Hugging Face.
 
-    Replace this body with your chosen provider, e.g.:
+    Model: dima806/deepfake_vs_real_image_detection
+    Returns labels like "real" or "fake" with confidence.
 
-    ┌─────────────────────────────────────────────────────────────────────────┐
-    │  Hive Moderation  (https://hivemoderation.com)                          │
-    │  DEEPFAKE_API_KEY = os.environ.get("DEEPFAKE_API_KEY")                  │
-    │  resp = requests.post(                                                   │
-    │      "https://api.thehive.ai/api/v2/task/sync",                         │
-    │      headers={"Authorization": f"Token {DEEPFAKE_API_KEY}"},            │
-    │      files={"image": image_bytes},                                       │
-    │      timeout=60,                                                         │
-    │  )                                                                       │
-    │  score = resp.json()["status"][0]["response"]["output"][0]              │
-    │           ["classes"][0]["score"]  # ai_generated probability            │
-    │  return {"trust_score": 1.0 - score, "is_deepfake": score > 0.5,       │
-    │          "confidence": score}                                            │
-    ├─────────────────────────────────────────────────────────────────────────┤
-    │  Reality Defender  (https://realitydefender.com)                        │
-    │  resp = requests.post(                                                   │
-    │      "https://api.realitydefender.com/v1/image/analyze",               │
-    │      headers={"Authorization": f"Bearer {DEEPFAKE_API_KEY}"},           │
-    │      files={"image": image_bytes},                                       │
-    │      timeout=60,                                                         │
-    │  )                                                                       │
-    │  data = resp.json()                                                      │
-    │  trust = data["authenticity_score"]                                      │
-    │  return {"trust_score": trust, "is_deepfake": trust < 0.5,              │
-    │          "confidence": data["confidence"]}                               │
-    └─────────────────────────────────────────────────────────────────────────┘
-
-    Returns:
-        dict: trust_score (0.0–1.0), is_deepfake (bool), confidence (0.0–1.0)
+    Return schema:
+        {"trust_score": 0.0-1.0, "is_deepfake": bool, "confidence": 0.0-1.0}
     """
-    logger.info("analyze_image called with %d bytes (placeholder)", len(image_bytes))
-    return {"trust_score": 0.22, "is_deepfake": True, "confidence": 0.87}
+    logger.info("analyze_image: sending %d bytes to HF model %s", len(image_bytes), HF_IMAGE_MODEL)
+
+    result = _hf_query(HF_IMAGE_MODEL, image_bytes)
+
+    # Expected: [{"label": "real", "score": 0.98}, {"label": "fake", "score": 0.02}]
+    if isinstance(result, list) and result:
+        scores = {item["label"].lower(): item["score"] for item in result}
+        fake_score = scores.get("fake", 0.0)
+        real_score = scores.get("real", 0.0)
+
+        trust_score = real_score
+        is_deepfake = fake_score > real_score
+        confidence = max(fake_score, real_score)
+
+        logger.info("analyze_image: real=%.3f fake=%.3f => deepfake=%s",
+                     real_score, fake_score, is_deepfake)
+        return {"trust_score": trust_score, "is_deepfake": is_deepfake, "confidence": confidence}
+
+    logger.warning("analyze_image: unexpected HF response format: %s", str(result)[:200])
+    return {"trust_score": 0.5, "is_deepfake": False, "confidence": 0.0}
 
 
 def analyze_video(video_bytes: bytes) -> dict:
     """
-    PLACEHOLDER – detect AI-generated or face-swapped video.
+    Detect AI-generated / deepfake video via Hugging Face.
 
-    Replace this body with your chosen provider, e.g.:
+    Uses frame-level image classification as a best-effort check.
+    For production, consider a dedicated video deepfake API.
 
-    ┌─────────────────────────────────────────────────────────────────────────┐
-    │  Reality Defender  (https://realitydefender.com)                        │
-    │  DEEPFAKE_API_KEY = os.environ.get("DEEPFAKE_API_KEY")                  │
-    │  resp = requests.post(                                                   │
-    │      "https://api.realitydefender.com/v1/video/analyze",               │
-    │      headers={"Authorization": f"Bearer {DEEPFAKE_API_KEY}"},           │
-    │      files={"video": video_bytes},                                       │
-    │      timeout=120,                                                        │
-    │  )                                                                       │
-    │  data = resp.json()                                                      │
-    │  trust = data["authenticity_score"]                                      │
-    │  return {"trust_score": trust, "is_deepfake": trust < 0.5,              │
-    │          "confidence": data["confidence"]}                               │
-    ├─────────────────────────────────────────────────────────────────────────┤
-    │  Sensity AI  (https://sensity.ai)                                       │
-    │  resp = requests.post(                                                   │
-    │      "https://api.sensity.ai/v1/detect/video",                          │
-    │      headers={"Authorization": f"Bearer {DEEPFAKE_API_KEY}"},           │
-    │      files={"video": video_bytes},                                       │
-    │      timeout=120,                                                        │
-    │  )                                                                       │
-    │  data = resp.json()                                                      │
-    │  return {"trust_score": 1.0 - data["score"], "is_deepfake": data["fake"]│
-    │          "confidence": data["confidence"]}                               │
-    └─────────────────────────────────────────────────────────────────────────┘
-
-    Returns:
-        dict: trust_score (0.0–1.0), is_deepfake (bool), confidence (0.0–1.0)
+    Return schema:
+        {"trust_score": 0.0-1.0, "is_deepfake": bool, "confidence": 0.0-1.0}
     """
-    logger.info("analyze_video called with %d bytes (placeholder)", len(video_bytes))
-    return {"trust_score": 0.14, "is_deepfake": True, "confidence": 0.94}
+    logger.info("analyze_video: sending %d bytes to HF model %s (frame-level check)",
+                len(video_bytes), HF_VIDEO_MODEL)
+
+    result = _hf_query(HF_VIDEO_MODEL, video_bytes)
+
+    if isinstance(result, list) and result:
+        scores = {item["label"].lower(): item["score"] for item in result}
+        fake_score = scores.get("fake", 0.0)
+        real_score = scores.get("real", 0.0)
+
+        trust_score = real_score
+        is_deepfake = fake_score > real_score
+        confidence = max(fake_score, real_score)
+
+        logger.info("analyze_video: real=%.3f fake=%.3f => deepfake=%s",
+                     real_score, fake_score, is_deepfake)
+        return {"trust_score": trust_score, "is_deepfake": is_deepfake, "confidence": confidence}
+
+    logger.warning("analyze_video: unexpected HF response format: %s", str(result)[:200])
+    return {"trust_score": 0.5, "is_deepfake": False, "confidence": 0.0}
 
 
-# ---------------------------------------------------------------------------
-# Reply formatting
-# ---------------------------------------------------------------------------
+# ── Reply formatting ─────────────────────────────────────────────────────────
 
 MEDIA_LABELS = {
     "audio": "voice note",
@@ -257,9 +264,7 @@ def build_trust_reply(result: dict, media_type: str) -> str:
         )
 
 
-# ---------------------------------------------------------------------------
-# Webhook routes
-# ---------------------------------------------------------------------------
+# ── Webhook routes ───────────────────────────────────────────────────────────
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -282,9 +287,9 @@ def receive_message():
     Receive and process incoming WhatsApp messages.
 
     Supported media:
-    - voice / audio  → AI voice detection
-    - image          → AI image / face-swap detection
-    - video          → AI video / deepfake detection
+    - voice / audio  → AI voice detection  (HF: wav2vec2-deepfake-voice-detector)
+    - image          → AI image detection  (HF: deepfake_vs_real_image_detection)
+    - video          → AI video detection  (HF: frame-level via image model)
     - text           → prompt user to send media
     """
     data = request.get_json(silent=True) or {}
@@ -366,13 +371,13 @@ def receive_message():
 
     except (KeyError, IndexError, TypeError) as exc:
         logger.error("Failed to parse webhook payload: %s | raw=%s", exc, data)
+    except Exception as exc:
+        logger.error("Error processing message: %s", exc, exc_info=True)
 
     return jsonify({"status": "ok"}), 200
 
 
-# ---------------------------------------------------------------------------
-# Privacy Policy
-# ---------------------------------------------------------------------------
+# ── Privacy Policy ───────────────────────────────────────────────────────────
 
 PRIVACY_POLICY_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -456,9 +461,7 @@ def privacy_policy():
     return PRIVACY_POLICY_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
-# ---------------------------------------------------------------------------
-# Health check
-# ---------------------------------------------------------------------------
+# ── Health check ─────────────────────────────────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -469,9 +472,7 @@ def health():
     }), 200
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+# ── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
